@@ -151,11 +151,13 @@ const driver = `
     conflicts: [],
   };
 
-  // 0. 解析：合法词与非法词分离，重复合法词仍静默去重（既有行为不变）
+  // 0. 解析：合法词与非法词分离；重复合法词去重进入 values（重复值另记入
+  //    dups 并拦截求解/保存，见 tests/duplicate_draft.test.js）
   const parsed = parseCandidates("520 x 3.5 0 -4 540 520");
   t("parseCandidates：合法/非法词分离，重复合法词仍去重",
     JSON.stringify(parsed.values) === "[520,540]" &&
-    JSON.stringify(parsed.invalid) === '["x","3.5","0","-4"]');
+    JSON.stringify(parsed.invalid) === '["x","3.5","0","-4"]' &&
+    JSON.stringify(parsed.dups) === "[520]");
 
   // 通过界面控件录入合法方案（模拟用户键入，只触发 input，不触发 change）
   $el("#planName").value = "非法草稿测试";
