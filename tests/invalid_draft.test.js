@@ -13,6 +13,9 @@
  *   4. 失焦不抹去：change 重绘后非法原文与提示仍在；
  *   5. 改正前拦截：求解与保存均不发请求并提示校验错误；
  *   6. 改正即恢复：合法列表未失焦提交，求解/保存提交改正后的新列表。
+ *
+ * 重复候选频点的识别与拦截由 duplicate_draft.test.js 覆盖；本文件只验证
+ * 无法识别词与重复值在 parseCandidates 中被正确区分。
  */
 "use strict";
 
@@ -151,11 +154,18 @@ const driver = `
     conflicts: [],
   };
 
-  // 0. 解析：合法词与非法词分离，重复合法词仍静默去重（既有行为不变）
+  // 0. 解析：合法词、无法识别词、重复值三者分离；合法值去重后进入 values
   const parsed = parseCandidates("520 x 3.5 0 -4 540 520");
-  t("parseCandidates：合法/非法词分离，重复合法词仍去重",
+  t("parseCandidates：合法/无法识别词分离，重复值单独记入 dupes",
     JSON.stringify(parsed.values) === "[520,540]" &&
-    JSON.stringify(parsed.invalid) === '["x","3.5","0","-4"]');
+    JSON.stringify(parsed.invalid) === '["x","3.5","0","-4"]' &&
+    JSON.stringify(parsed.dupes) === "[520]");
+  // 按频点数值识别重复：不同原文写法只要数值相同即为重复
+  const parsed2 = parseCandidates("520 0520 540");
+  t("parseCandidates：按频点数值识别重复（520 与 0520 同值）",
+    JSON.stringify(parsed2.values) === "[520,540]" &&
+    JSON.stringify(parsed2.dupes) === "[520]" &&
+    parsed2.invalid.length === 0);
 
   // 通过界面控件录入合法方案（模拟用户键入，只触发 input，不触发 change）
   $el("#planName").value = "非法草稿测试";

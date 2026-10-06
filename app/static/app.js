@@ -50,9 +50,12 @@ function blankMic(id) {
     candidates: [],
     current: null,
     locked: false,
-    // 候选草稿中非法词的暂存：candInvalid 非空时 candText 为文本框原文，
-    // 失焦/重绘按原文回显，绝不静默丢弃；草稿全部合法时为 [] 与 null。
+    // 候选草稿中问题词的暂存：candInvalid 为无法识别的原文词，candDupes 为
+    // 按频点数值识别出的重复值；任一非空时 candText 为文本框原文，
+    // 失焦/重绘按原文回显，绝不静默丢弃（含重复出现的那个词）；草稿无任何
+    // 问题时两者均为 [] 且 candText 为 null。
     candInvalid: [],
+    candDupes: [],
     candText: null,
   };
 }
@@ -65,9 +68,11 @@ function renderMics() {
   const wrap = $("#mics");
   wrap.innerHTML = "";
   plan.mics.forEach((mic, idx) => {
-    // 含非法词的草稿按原文回显（失焦/重绘不抹去），合法草稿规整为候选列表
-    const invalid = (mic.candInvalid || []).length > 0;
-    const draftText = invalid ? mic.candText : mic.candidates.join(", ");
+    // 含无法识别词或重复值的草稿按原文回显（失焦/重绘不抹去），无问题草稿
+    // 规整为候选列表
+    const hasErr =
+      (mic.candInvalid || []).length > 0 || (mic.candDupes || []).length > 0;
+    const draftText = hasErr ? mic.candText : mic.candidates.join(", ");
     const card = document.createElement("div");
     card.className = "mic-card";
     card.innerHTML = `
@@ -86,9 +91,9 @@ function renderMics() {
         <div class="cap">候选频点（1～12 个互异正整数 kHz，用空格/逗号分隔）
           <span class="cand-count">${mic.candidates.length}/12</span>
         </div>
-        <textarea class="cand-area${invalid ? " invalid" : ""}" data-k="candidates" rows="2"
+        <textarea class="cand-area${hasErr ? " invalid" : ""}" data-k="candidates" rows="2"
           placeholder="例如：520 530 540 550">${escapeHtml(draftText)}</textarea>
-        <div class="cand-err">${invalid ? escapeHtml(candErrText(mic)) : ""}</div>
+        <div class="cand-err">${hasErr ? escapeHtml(candErrText(mic)) : ""}</div>
       </div>
       <div class="mic-field">
         <div class="cap">现用频点（可选，须在候选中）</div>
@@ -123,20 +128,20 @@ function renderMics() {
 
     const candArea = card.querySelector('[data-k="candidates"]');
     const candErr = card.querySelector(".cand-err");
-    // 键入即提交草稿（不等失焦）：合法词立即写入 plan，非法词暂存草稿并
-    // 即时给出校验反馈；指纹随任一草稿改动（含非法词）变化，旧结果立即
-    // 撤下、在途求解立即失效
+    // 键入即提交草稿（不等失焦）：合法词立即写入 plan，无法识别词与重复
+    // 频点暂存草稿并即时给出校验反馈；指纹随任一草稿改动（含无法识别词与
+    // 重复频点）变化，旧结果立即撤下、在途求解立即失效
     candArea.addEventListener("input", () => {
       commitCandDraft(mic, candArea.value);
       card.querySelector(".cand-count").textContent =
         `${mic.candidates.length}/12`;
-      candArea.className =
-        "cand-area" + (mic.candInvalid.length ? " invalid" : "");
-      candErr.textContent = mic.candInvalid.length ? candErrText(mic) : "";
+      candArea.className = "cand-area" + (candHasErr(mic) ? " invalid" : "");
+      candErr.textContent = candHasErr(mic) ? candErrText(mic) : "";
       onPlanEdited();
     });
-    // 失焦时规整：合法草稿规范化重写；非法草稿按原文保留（不抹去非法词），
-    // 校验反馈继续显示；清理失效的现用频点并重建卡片（刷新下拉框与计数）
+    // 失焦时规整：无问题草稿规范化重写；有问题草稿（无法识别词或重复值）
+    // 按原文保留（不抹去问题词），校验反馈继续显示；清理失效的现用频点并
+    // 重建卡片（刷新下拉框与计数）
     candArea.addEventListener("change", () => {
       commitCandDraft(mic, candArea.value);
       if (mic.current != null && !mic.candidates.includes(mic.current)) {
@@ -162,36 +167,73 @@ function renderMics() {
   });
 }
 
-// 解析候选频点草稿：合法词（互异正整数 kHz）进入 values，非法词原样
-// 记入 invalid——非法词不得静默丢弃。
+// 解析候选频点草稿：
+//   * 合法词（正整数 kHz）首次出现按序进入 values；
+//   * 无法识别的词原样记入 invalid——不得静默丢弃；
+//   * 数值上重复出现的合法词按频点数值记入 dupes（升序去重），与无法识别
+//     词区分开——例如 “520 0520” 数值相同也算重复；values 仍为去重后的
+//     合法候选，供求解/保存与下拉框沿用，但 dupes 非空时草稿不可提交。
 function parseCandidates(text) {
   const parts = text.split(/[\s,，、;；]+/).filter(Boolean);
   const values = [];
   const invalid = [];
+  const seen = new Set();
+  const dupSet = new Set();
   for (const p of parts) {
     const n = Number(p);
     if (Number.isInteger(n) && n > 0) {
-      if (!values.includes(n)) values.push(n);
+      if (seen.has(n)) {
+        dupSet.add(n);
+      } else {
+        seen.add(n);
+        values.push(n);
+      }
     } else {
       invalid.push(p);
     }
   }
-  return { values, invalid, rawCount: parts.length };
+  return { values, invalid, dupes: [...dupSet].sort((a, b) => a - b),
+    rawCount: parts.length };
+}
+
+// 草稿是否存在无法识别词或重复频点（任一存在都不能求解/保存）
+function candHasErr(mic) {
+  return (mic.candInvalid || []).length > 0 ||
+    (mic.candDupes || []).length > 0;
 }
 
 // 提交候选文本框草稿：合法词立即写入 mic.candidates（键入即生效）；
-// 非法词连同文本框原文暂存于 mic.candInvalid / mic.candText，待用户改正。
+// 无法识别词暂存 mic.candInvalid、重复频点值暂存 mic.candDupes，文本框原文
+// 暂存 mic.candText，待用户改正；两者皆空时草稿干净，原文暂存清空。
 function commitCandDraft(mic, text) {
   const parsed = parseCandidates(text);
   mic.candidates = parsed.values;
   mic.candInvalid = parsed.invalid;
-  mic.candText = parsed.invalid.length ? text : null;
+  mic.candDupes = parsed.dupes;
+  mic.candText =
+    parsed.invalid.length || parsed.dupes.length ? text : null;
 }
 
-// 非法词校验提示：列出无法识别的原文词，明确改正前不得求解/保存
-function candErrText(mic) {
+// 无法识别词提示：列出原文词，明确改正前不得求解/保存
+function candInvalidText(mic) {
   const bad = (mic.candInvalid || []).map((t) => `“${t}”`).join("、");
   return `无法识别：${bad} —— 候选频点须为正整数 kHz，改正前不能求解或保存`;
+}
+
+// 重复频点提示：按频点数值列出重复值（不依赖原文写法），明确改正前
+// 不得求解/保存
+function candDupText(mic) {
+  const dup = (mic.candDupes || []).map((f) => `${f} kHz`).join("、");
+  return `候选频点重复：${dup} —— 同一话筒的候选频点须互异，` +
+    "改正前不能求解或保存";
+}
+
+// 草稿校验提示：无法识别词与重复频点可能同时存在，逐项列出
+function candErrText(mic) {
+  const parts = [];
+  if ((mic.candInvalid || []).length) parts.push(candInvalidText(mic));
+  if ((mic.candDupes || []).length) parts.push(candDupText(mic));
+  return parts.join("；");
 }
 
 function escapeHtml(s) {
@@ -249,9 +291,10 @@ function collectPlan() {
 // 结果只属于“产生它的那份输入”：
 //   * 控件草稿键入（input 事件）即写回 plan，不等失焦——plan 始终与
 //     界面一致，求解/保存不会悄悄使用与界面不符的旧值；
-//   * 候选文本框的非法词不静默丢弃：暂存于 mic.candInvalid / candText 并
-//     计入指纹——即使合法候选未变，任一草稿改动同样使旧结果与在途求解
-//     立即失效，改正前 validatePlan 拦截求解与保存；
+//   * 候选文本框的无法识别词不静默丢弃：暂存于 mic.candInvalid / candText 并
+//     计入指纹；按频点数值识别出的重复候选暂存于 mic.candDupes（与无法识别
+//     词区分），同样计入指纹——即使去重后的合法候选未变，任一草稿改动同样
+//     使旧结果与在途求解立即失效，改正前 validatePlan 拦截求解与保存；
 //   * 求解时记录输入指纹 reqKey 与请求序号 reqId；
 //   * 响应（无论成功/失败）回来时，reqId 仍是最新且当前输入指纹仍等于
 //     reqKey，结果才允许上屏，否则静默丢弃；
@@ -277,6 +320,7 @@ function planFingerprint() {
       m.current,
       m.locked,
       m.candInvalid || [],
+      [...(m.candDupes || [])].sort((a, b) => a - b),
     ]),
   };
   return JSON.stringify(norm);
@@ -344,7 +388,7 @@ function validatePlan(p) {
   if (new Set(ids).size !== ids.length) errs.push("设备 ID 不得重复");
 
   for (const m of p.mics) {
-    if ((m.candInvalid || []).length)
+    if (candHasErr(m))
       errs.push(`设备 ${m.id || "?"} 的候选频点${candErrText(m)}`);
     if (m.candidates.length < 1 || m.candidates.length > 12)
       errs.push(`设备 ${m.id || "?"} 候选频点须为 1～12 个互异正整数 kHz`);
@@ -766,6 +810,7 @@ async function loadPlan(id) {
         current: m.current,
         locked: m.locked,
         candInvalid: [],
+        candDupes: [],
         candText: null,
       })),
     };
